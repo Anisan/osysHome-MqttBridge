@@ -4,7 +4,7 @@ from threading import Lock
 import paho.mqtt.client as mqtt
 from flask import redirect
 
-from app.core.lib.object import getObject, setProperty
+from app.core.lib.object import getObject, updateProperty
 from app.core.main.BasePlugin import BasePlugin
 from plugins.MqttBridge.forms.SettingForms import SettingsForm
 
@@ -44,6 +44,7 @@ class MqttBridge(BasePlugin):
         self._last_publish_ts = None
         self._last_inbound_ts = None
         self._suppress_echo = {}
+        self._outbound_echo = {}
         self._suppress_lock = Lock()
         self._suppress_ttl = 5.0
 
@@ -233,13 +234,16 @@ class MqttBridge(BasePlugin):
             property_name = parts[-1]
             payload = msg.payload.decode("utf-8") if msg.payload else ""
 
+            if self._is_outbound_echo(object_name, property_name, payload):
+                return
+
             allowed, _ = self._get_meta(object_name)
             if not allowed:
                 return
 
             self._mark_suppressed(object_name, property_name, payload)
             try:
-                setProperty(f"{object_name}.{property_name}", payload, source=self.name)
+                updateProperty(f"{object_name}.{property_name}", payload, source=self.name)
             except Exception:
                 with self._stats_lock:
                     self._setproperty_error_count += 1
@@ -265,6 +269,7 @@ class MqttBridge(BasePlugin):
             with self._stats_lock:
                 self._publish_count += 1
                 self._last_publish_ts = time.time()
+            self._mark_outbound_echo(topic, value)
             self._client.publish(topic, str(value))
         except Exception as ex:
             with self._stats_lock:
@@ -388,6 +393,37 @@ class MqttBridge(BasePlugin):
                 return False
             if expected == value:
                 self._suppress_echo.pop(key, None)
+                with self._stats_lock:
+                    self._suppressed_count += 1
+                return True
+            return False
+
+    def _mark_outbound_echo(self, topic: str, value) -> None:
+        parts = [p for p in (topic or "").split("/") if p]
+        if len(parts) < 3:
+            return
+        key = f"{parts[-2]}.{parts[-1]}"
+        with self._suppress_lock:
+            self._outbound_echo[key] = (str(value), time.time() + self._suppress_ttl)
+
+    def _is_outbound_echo(self, obj: str, prop: str, value) -> bool:
+        now = time.time()
+        key = f"{obj}.{prop}"
+        value = str(value)
+        with self._suppress_lock:
+            expired_keys = [k for k, (_, exp) in self._outbound_echo.items() if exp < now]
+            for k in expired_keys:
+                self._outbound_echo.pop(k, None)
+
+            item = self._outbound_echo.get(key)
+            if not item:
+                return False
+            expected, expires = item
+            if expires < now:
+                self._outbound_echo.pop(key, None)
+                return False
+            if expected == value:
+                self._outbound_echo.pop(key, None)
                 with self._stats_lock:
                     self._suppressed_count += 1
                 return True
