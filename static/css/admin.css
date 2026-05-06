@@ -1,0 +1,16 @@
+/* MqttBridge admin UI tweaks */
+#mqtt_bridge_app .stat-card .stat-value {
+  font-size: 1.6rem;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+#mqtt_bridge_app .stat-card .stat-label {
+  font-size: 0.85rem;
+  opacity: 0.75;
+}
+
+#mqtt_bridge_app code {
+  user-select: all;
+}
+

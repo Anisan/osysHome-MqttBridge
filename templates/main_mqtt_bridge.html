@@ -1,0 +1,249 @@
+{% extends "layouts/module_admin.html" %}
+{% block breadcrumb %}
+<li class="breadcrumb-item"><a href="MqttBridge">MqttBridge</a></li>
+{% endblock %}
+{% block module %}
+<link rel="stylesheet" href="/MqttBridge/static/css/admin.css">
+
+<div id="mqtt_bridge_app">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+        <div class="text-muted small">
+            <span v-if="stats">{{ _('Uptime') }}: [[ uptimeText ]]</span>
+        </div>
+        <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#mqttBridgeSettingsModal">
+            <span class="fas fa-gear me-1"></span> {{ _('Settings') }}
+        </button>
+    </div>
+
+    <div class="row g-3 mb-3">
+        <div class="col-12 col-md-6 col-lg-3">
+            <div class="card stat-card h-100">
+                <div class="card-body">
+                    <div class="stat-label">{{ _('MQTT Connection') }}</div>
+                    <div class="stat-value">
+                        <span class="badge" :class="connectionBadgeClass">[[ connectionLabel ]]</span>
+                    </div>
+                    <div v-if="connection && connection.error" class="small text-muted mt-1">[[ connection.error ]]</div>
+                    <div class="small text-muted mt-1" v-if="connection && connection.connected_at_ts">
+                        {{ _('Connected at') }}: <code>[[ connectedAtText ]]</code>
+                    </div>
+                    <div class="small text-muted mt-1" v-else>
+                        {{ _('Connected at') }}: <code>-</code>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-md-6 col-lg-3">
+            <div class="card stat-card h-100">
+                <div class="card-body">
+                    <div class="stat-label">{{ _('Publishes') }}</div>
+                    <div class="stat-value">[[ stats ? stats.publish_count : '-' ]]</div>
+                    <div class="small text-muted mt-1">
+                        [[ rate.publish_per_s.toFixed(0) ]] /s · {{ _('Last') }}: [[ lastPublishAgo ]]
+                    </div>
+                    <div class="small text-muted">
+                        {{ _('Errors') }}: [[ stats ? stats.publish_error_count : '-' ]]
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-md-6 col-lg-3">
+            <div class="card stat-card h-100">
+                <div class="card-body">
+                    <div class="stat-label">{{ _('Inbound updates') }}</div>
+                    <div class="stat-value">[[ stats ? stats.inbound_count : '-' ]]</div>
+                    <div class="small text-muted mt-1">
+                        [[ rate.inbound_per_s.toFixed(0) ]] /s · {{ _('Last') }}: [[ lastInboundAgo ]]
+                    </div>
+                    <div class="small text-muted">
+                        {{ _('Errors') }}: [[ stats ? stats.inbound_error_count : '-' ]] · {{ _('setProperty errors') }}: [[ stats ? stats.setproperty_error_count : '-' ]]
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-12 col-md-6 col-lg-3">
+            <div class="card stat-card h-100">
+                <div class="card-body">
+                    <div class="stat-label">{{ _('Suppressed echoes') }}</div>
+                    <div class="stat-value">[[ stats ? stats.suppressed_count : '-' ]]</div>
+                    <div class="small text-muted mt-1">
+                        {{ _('caches') }}: meta [[ stats ? stats.caches.meta_cache_size : '-' ]], {{ _('path') }} [[ stats ? stats.caches.object_path_cache_size : '-' ]]
+                    </div>
+                    <div class="small text-muted">
+                        {{ _('whitelist') }}: classes [[ stats ? stats.whitelist.classes_count : '-' ]], objects [[ stats ? stats.whitelist.objects_count : '-' ]]
+                        · {{ _('blacklist') }}: classes [[ stats ? stats.blacklist.classes_count : '-' ]], objects [[ stats ? stats.blacklist.objects_count : '-' ]]
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-body">
+            <div class="d-flex flex-wrap gap-2">
+                <div class="text-muted small">
+                    {{ _('Prefix') }}: <code>[[ stats ? stats.config.topic_prefix : '-' ]]</code>
+                </div>
+                <div class="text-muted small">
+                    {{ _('Inbound') }}: <code>[[ stats ? (stats.config.enable_inbound ? "{{ _('enabled') }}" : "{{ _('disabled') }}") : '-' ]]</code>
+                </div>
+                <div class="text-muted small">
+                    {{ _('Broker') }}: <code>[[ stats ? (stats.config.host || '-') : '-' ]]</code>:<code>[[ stats ? stats.config.port : '-' ]]</code>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card mb-3">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <span>{{ _('Outbound filter policy') }}</span>
+            <span class="badge" :class="stats && stats.outbound_policy && stats.outbound_policy.mode === 'whitelist' ? 'bg-primary' : 'bg-secondary'">
+                [[ stats && stats.outbound_policy && stats.outbound_policy.mode === 'whitelist' ? "{{ _('Whitelist mode') }}" : "{{ _('Default mode') }}" ]]
+            </span>
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-12 col-md-6">
+                    <div class="small fw-semibold text-success mb-2">{{ _('Allowed for publish') }}</div>
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item px-0 py-1">
+                            {{ _('Classes') }}:
+                            <code v-if="stats && stats.whitelist && stats.whitelist.classes && stats.whitelist.classes.length">
+                                [[ stats.whitelist.classes.join(', ') ]]
+                            </code>
+                            <span v-else class="text-muted">{{ _('any (except denied/default-internal)') }}</span>
+                        </li>
+                        <li class="list-group-item px-0 py-1">
+                            {{ _('Objects') }}:
+                            <code v-if="stats && stats.whitelist && stats.whitelist.objects && stats.whitelist.objects.length">
+                                [[ stats.whitelist.objects.join(', ') ]]
+                            </code>
+                            <span v-else class="text-muted">{{ _('any (except denied/default-internal)') }}</span>
+                        </li>
+                        <li class="list-group-item px-0 py-1 text-muted">
+                            {{ _('If whitelist is set, only matching classes/objects are allowed.') }}
+                        </li>
+                    </ul>
+                </div>
+                <div class="col-12 col-md-6">
+                    <div class="small fw-semibold text-danger mb-2">{{ _('Denied for publish') }}</div>
+                    <ul class="list-group list-group-flush">
+                        <li class="list-group-item px-0 py-1">
+                            {{ _('Classes') }}:
+                            <code v-if="stats && stats.blacklist && stats.blacklist.classes && stats.blacklist.classes.length">
+                                [[ stats.blacklist.classes.join(', ') ]]
+                            </code>
+                            <span v-else class="text-muted">{{ _('none') }}</span>
+                        </li>
+                        <li class="list-group-item px-0 py-1">
+                            {{ _('Objects') }}:
+                            <code v-if="stats && stats.blacklist && stats.blacklist.objects && stats.blacklist.objects.length">
+                                [[ stats.blacklist.objects.join(', ') ]]
+                            </code>
+                            <span v-else class="text-muted">{{ _('none') }}</span>
+                        </li>
+                        <li class="list-group-item px-0 py-1 text-muted">
+                            {{ _('Internal defaults are denied:') }} <code>System, Users, Permissions, _permissions, _*</code>.
+                        </li>
+                        <li class="list-group-item px-0 py-1 text-muted">
+                            {{ _('Blacklist always has priority over whitelist.') }}
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings modal -->
+    <div class="modal fade" id="mqttBridgeSettingsModal" tabindex="-1" aria-labelledby="mqttBridgeSettingsLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <form method="POST">
+                    {{ form.hidden_tag() }}
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="mqttBridgeSettingsLabel">{{ _('MqttBridge settings') }}</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="row g-3">
+                            <div class="col-12 col-md-6">
+                                <label class="form-label">{{ _('Host') }}</label>
+                                {{ form.host(class="form-control") }}
+                            </div>
+                            <div class="col-12 col-md-2">
+                                <label class="form-label">{{ _('Port') }}</label>
+                                {{ form.port(class="form-control") }}
+                            </div>
+                            <div class="col-12 col-md-4">
+                                <label class="form-label">{{ _('Topic Prefix') }}</label>
+                                {{ form.topic_prefix(class="form-control") }}
+                                <div class="form-text">{{ _('Example: home1') }}</div>
+                            </div>
+
+                            <div class="col-12 col-md-6">
+                                <label class="form-label">{{ _('Login') }}</label>
+                                {{ form.login(class="form-control") }}
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label">{{ _('Password') }}</label>
+                                {{ form.password(class="form-control") }}
+                            </div>
+
+                            <div class="col-12 col-md-6">
+                                <label class="form-label">{{ _('Whitelist Classes') }}</label>
+                                {{ form.whitelist_classes(class="form-control", rows="4") }}
+                                <div class="form-text">{{ _('Class names, comma or newline separated.') }}</div>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label">{{ _('Whitelist Objects') }}</label>
+                                {{ form.whitelist_objects(class="form-control", rows="4") }}
+                                <div class="form-text">{{ _('Object names, comma or newline separated.') }}</div>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label">{{ _('Blacklist Classes') }}</label>
+                                {{ form.blacklist_classes(class="form-control", rows="4") }}
+                                <div class="form-text">{{ _('Blacklist has priority and excludes matching classes.') }}</div>
+                            </div>
+                            <div class="col-12 col-md-6">
+                                <label class="form-label">{{ _('Blacklist Objects') }}</label>
+                                {{ form.blacklist_objects(class="form-control", rows="4") }}
+                                <div class="form-text">{{ _('Blacklist has priority and excludes matching objects.') }}</div>
+                            </div>
+
+                            <div class="col-12">
+                                <div class="form-check">
+                                    {{ form.enable_inbound(class="form-check-input") }}
+                                    <label class="form-check-label">{{ _('Enable inbound sync') }}</label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">{{ _('Close') }}</button>
+                        <button type="submit" class="btn btn-primary">{{ _('Save & reconnect') }}</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="{{ config.ASSETS_ROOT }}/plugins/vue/vue@2.js"></script>
+<script src="{{ config.ASSETS_ROOT }}/plugins/socket.io/socket.io.js"></script>
+<script>
+    window.MqttBridgeI18n = {
+        connected: "{{ _('Connected') }}",
+        connecting: "{{ _('Connecting...') }}",
+        error: "{{ _('Error') }}",
+        disconnected: "{{ _('Disconnected') }}",
+        just_now: "{{ _('just now') }}",
+        s_ago: "{{ _('s ago') }}",
+        m_ago: "{{ _('m ago') }}",
+        h_ago: "{{ _('h ago') }}",
+    };
+</script>
+<script src="/MqttBridge/static/js/admin.js"></script>
+{% endblock %}
