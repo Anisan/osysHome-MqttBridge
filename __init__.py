@@ -316,18 +316,19 @@ class MqttBridge(BasePlugin):
         object_classes = set(parents or [])
 
         # Blacklist has priority over whitelist/defaults.
-        if object_name in object_blacklist:
+        if object_name in object_blacklist or bool(
+            object_classes.intersection(class_blacklist)
+        ):
             allowed = False
-        elif class_blacklist and bool(object_classes.intersection(class_blacklist)):
-            allowed = False
-        elif object_whitelist and object_name not in object_whitelist:
-            allowed = False
-        elif object_whitelist and object_name in object_whitelist:
-            # Explicit object allowlist entry should pass even if class whitelist is set.
-            allowed = True
         else:
-            if class_whitelist:
-                allowed = bool(object_classes.intersection(class_whitelist))
+            if class_whitelist or object_whitelist:
+                # Whitelist semantics:
+                # - only classes set -> allow by class
+                # - only objects set -> allow by object name
+                # - both set -> allow if either rule matches
+                allowed_by_class = bool(object_classes.intersection(class_whitelist))
+                allowed_by_object = object_name in object_whitelist
+                allowed = allowed_by_class or allowed_by_object
             else:
                 internal = {"Users", "Permissions", "_permissions"}
                 if object_name.startswith("_"):
