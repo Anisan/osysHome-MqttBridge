@@ -322,6 +322,9 @@ class MqttBridge(BasePlugin):
             allowed = False
         elif object_whitelist and object_name not in object_whitelist:
             allowed = False
+        elif object_whitelist and object_name in object_whitelist:
+            # Explicit object allowlist entry should pass even if class whitelist is set.
+            allowed = True
         else:
             if class_whitelist:
                 allowed = bool(object_classes.intersection(class_whitelist))
