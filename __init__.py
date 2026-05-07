@@ -4,7 +4,7 @@ from threading import Lock
 import paho.mqtt.client as mqtt
 from flask import redirect
 
-from app.core.lib.object import getObject, updateProperty
+from app.core.lib.object import getObject, getProperty, updateProperty
 from app.core.main.BasePlugin import BasePlugin
 from plugins.MqttBridge.forms.SettingForms import SettingsForm
 
@@ -19,6 +19,7 @@ class MqttBridge(BasePlugin):
         self.actions = ["proxy", "cycle"]
 
         self._client = None
+        self._mqtt_protocol = "unknown"
         self._connection_status = "disconnected"  # disconnected, connecting, connected, error
         self._connection_error = None
         self._connected_at_ts = None
@@ -99,14 +100,43 @@ class MqttBridge(BasePlugin):
         self.event.wait(1.0)
 
     def changeProperty(self, obj: str, prop: str, value) -> None:
+        source = self._get_property_source(obj, prop)
+        if self._is_self_source(source):
+            self.logger.debug(
+                "MqttBridge outbound skipped (self source): target=%s.%s source=%s payload=%s",
+                obj,
+                prop,
+                source,
+                value,
+            )
+            return
+
         if not self._is_ready_to_publish():
+            self.logger.debug(
+                "MqttBridge outbound skipped (mqtt not ready): target=%s.%s payload=%s",
+                obj,
+                prop,
+                value,
+            )
             return
 
         if self._is_suppressed(obj, prop, value):
+            self.logger.debug(
+                "MqttBridge outbound skipped (suppressed): target=%s.%s payload=%s",
+                obj,
+                prop,
+                value,
+            )
             return
 
         allowed, class_path = self._get_meta(obj)
         if not allowed:
+            self.logger.debug(
+                "MqttBridge outbound skipped (not allowed): target=%s.%s payload=%s",
+                obj,
+                prop,
+                value,
+            )
             return
 
         if not class_path:
@@ -163,10 +193,23 @@ class MqttBridge(BasePlugin):
             port = 1883
 
         try:
-            self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+            self._mqtt_protocol = "MQTTv311"
+            try:
+                self._client = mqtt.Client(
+                    mqtt.CallbackAPIVersion.VERSION1, protocol=mqtt.MQTTv5
+                )
+                self._mqtt_protocol = "MQTTv5"
+            except Exception as ex:
+                self.logger.warning(
+                    "MqttBridge MQTTv5 init failed, fallback to MQTTv311: %s", ex
+                )
+                self._client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION1)
+                self._mqtt_protocol = "MQTTv311"
+
             self._client.on_connect = self._on_connect
             self._client.on_disconnect = self._on_disconnect
             self._client.on_message = self._on_message
+            self.logger.info("MqttBridge MQTT protocol enabled: %s", self._mqtt_protocol)
 
             login = (self.config.get("login", "") or "").strip()
             password = self.config.get("password", "") or ""
@@ -183,7 +226,7 @@ class MqttBridge(BasePlugin):
             self._connected_at_ts = None
             self._push_connection_status()
 
-    def _on_connect(self, client, userdata, flags, rc):
+    def _on_connect(self, client, userdata, flags, rc, properties=None):
         if rc != 0:
             self.logger.error("MqttBridge MQTT connect failed with code: %s", rc)
             self._connection_status = "error"
@@ -198,10 +241,21 @@ class MqttBridge(BasePlugin):
         self._push_connection_status()
         if self.config.get("enable_inbound", True):
             topic = f"{self._topic_prefix()}/#"
+            if self._mqtt_protocol == "MQTTv5" and hasattr(mqtt, "SubscribeOptions"):
+                try:
+                    options = mqtt.SubscribeOptions(qos=0, noLocal=True)
+                    client.subscribe(topic, options=options)
+                    self.logger.info("MqttBridge subscribed (noLocal=True): %s", topic)
+                    return
+                except Exception as ex:
+                    self.logger.warning(
+                        "MqttBridge noLocal subscribe failed, fallback to standard subscribe: %s",
+                        ex,
+                    )
             client.subscribe(topic)
             self.logger.info("MqttBridge subscribed: %s", topic)
 
-    def _on_disconnect(self, client, userdata, rc):
+    def _on_disconnect(self, client, userdata, rc, properties=None):
         if rc == 0:
             self._connection_status = "disconnected"
             self._connection_error = None
@@ -216,6 +270,7 @@ class MqttBridge(BasePlugin):
 
     def _on_message(self, client, userdata, msg):
         if not self.config.get("enable_inbound", True):
+            self.logger.debug("MqttBridge inbound skipped (disabled)")
             return
         try:
             topic = msg.topic or ""
@@ -224,23 +279,59 @@ class MqttBridge(BasePlugin):
             # 1) {prefix}/{class_path}/{object}/{property}  (>=4 parts incl. prefix)
             # 2) {prefix}/{object}/{property}              (=3 parts incl. prefix)
             if len(parts) < 3:
+                self.logger.debug(
+                    "MqttBridge inbound skipped (invalid topic format): topic=%s", topic
+                )
                 return
 
             prefix = self._topic_prefix()
             if not parts or parts[0] != prefix:
+                self.logger.debug(
+                    "MqttBridge inbound skipped (prefix mismatch): topic=%s expected_prefix=%s",
+                    topic,
+                    prefix,
+                )
                 return
 
             object_name = parts[-2]
             property_name = parts[-1]
-            payload = msg.payload.decode("utf-8") if msg.payload else ""
+            try:
+                payload = msg.payload.decode("utf-8") if msg.payload else ""
+            except UnicodeDecodeError as ex:
+                self.logger.warning(
+                    "MqttBridge inbound skipped (invalid utf-8 payload): topic=%s error=%s",
+                    topic,
+                    ex,
+                )
+                return
 
             if self._is_outbound_echo(object_name, property_name, payload):
+                self.logger.debug(
+                    "MqttBridge inbound skipped (outbound echo): target=%s.%s payload=%s",
+                    object_name,
+                    property_name,
+                    payload,
+                )
                 return
 
-            allowed, _ = self._get_meta(object_name)
+            allowed, deny_reason = self._is_inbound_allowed(object_name)
             if not allowed:
+                self.logger.debug(
+                    "MqttBridge inbound skipped (not allowed: %s): target=%s.%s payload=%s",
+                    deny_reason,
+                    object_name,
+                    property_name,
+                    payload,
+                )
                 return
 
+            self.logger.info(
+                "MqttBridge inbound: topic=%s target=%s.%s payload=%s",
+                topic,
+                object_name,
+                property_name,
+                payload,
+            )
             self._mark_suppressed(object_name, property_name, payload)
             try:
                 updateProperty(f"{object_name}.{property_name}", payload, source=self.name)
@@ -269,12 +360,41 @@ class MqttBridge(BasePlugin):
             with self._stats_lock:
                 self._publish_count += 1
                 self._last_publish_ts = time.time()
+            self.logger.debug("MqttBridge outbound: topic=%s payload=%s", topic, value)
             self._mark_outbound_echo(topic, value)
-            self._client.publish(topic, str(value))
+            msg_info = self._client.publish(topic, str(value))
+            self.logger.debug(
+                "MqttBridge publish result: topic=%s mid=%s rc=%s",
+                topic,
+                getattr(msg_info, "mid", None),
+                getattr(msg_info, "rc", None),
+            )
+            if getattr(msg_info, "rc", 0) != 0:
+                self.logger.warning(
+                    "MqttBridge publish returned non-success rc=%s for topic=%s",
+                    getattr(msg_info, "rc", None),
+                    topic,
+                )
         except Exception as ex:
             with self._stats_lock:
                 self._publish_error_count += 1
             self.logger.error("MqttBridge publish error (%s): %s", topic, ex, exc_info=True)
+
+    def _get_property_source(self, obj: str, prop: str) -> str:
+        try:
+            source = getProperty(f'{obj}.{prop}', 'source')
+            return str(source) if source is not None else ""
+        except Exception as ex:
+            self.logger.debug(
+                "MqttBridge cannot resolve property source for %s.%s: %s", obj, prop, ex
+            )
+            return ""
+
+    def _is_self_source(self, source: str) -> bool:
+        if not source:
+            return False
+        source = str(source)
+        return source == self.name or source.startswith(f"{self.name}:")
 
     def _parse_list_config(self, key: str) -> set[str]:
         value = self.config.get(key, "") or ""
@@ -289,6 +409,37 @@ class MqttBridge(BasePlugin):
             self._blacklist_classes_set = self._parse_list_config("blacklist_classes")
             self._blacklist_objects_set = self._parse_list_config("blacklist_objects")
             self._meta_cache.clear()
+
+    def _is_inbound_allowed(self, object_name: str) -> tuple[bool, str]:
+        with self._cache_lock:
+            class_whitelist = set(self._whitelist_classes_set)
+            object_whitelist = set(self._whitelist_objects_set)
+            class_blacklist = set(self._blacklist_classes_set)
+            object_blacklist = set(self._blacklist_objects_set)
+
+        # Blacklist always has priority for inbound.
+        if object_name in object_blacklist:
+            return False, "object_blacklist"
+
+        obj = getObject(object_name)
+        if not obj:
+            return False, "object_not_found"
+
+        object_classes = set(getattr(obj, "parents", None) or [])
+        if class_blacklist and bool(object_classes.intersection(class_blacklist)):
+            return False, "class_blacklist"
+
+        # If whitelist is not configured at all, allow inbound by default
+        # (still respecting blacklist above).
+        if not object_whitelist and not class_whitelist:
+            return True, "whitelist_empty_default_allow"
+
+        if object_name in object_whitelist:
+            return True, "object_whitelist"
+        if class_whitelist and bool(object_classes.intersection(class_whitelist)):
+            return True, "class_whitelist"
+
+        return False, "not_in_whitelist"
 
     def _get_meta(self, object_name: str) -> tuple[bool, str]:
         with self._cache_lock:
@@ -441,6 +592,7 @@ class MqttBridge(BasePlugin):
                     "status": self._connection_status,
                     "error": self._connection_error,
                     "connected_at_ts": self._connected_at_ts,
+                    "protocol": self._mqtt_protocol,
                 },
             )
         except Exception:
@@ -490,6 +642,7 @@ class MqttBridge(BasePlugin):
                 "status": self._connection_status,
                 "error": self._connection_error,
                 "connected_at_ts": self._connected_at_ts,
+                "protocol": self._mqtt_protocol,
             },
             "caches": {
                 "meta_cache_size": meta_cache_size,

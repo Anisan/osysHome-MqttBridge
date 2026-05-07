@@ -39,6 +39,7 @@
           status: "disconnected",
           error: null,
           connected_at_ts: null,
+          protocol: null,
         },
         stats: null,
         lastStats: null,

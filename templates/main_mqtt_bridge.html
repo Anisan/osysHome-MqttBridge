@@ -5,7 +5,7 @@
 {% block module %}
 <link rel="stylesheet" href="/MqttBridge/static/css/admin.css">
 
-<div id="mqtt_bridge_app">
+<div id="mqtt_bridge_app" v-cloak>
     <div class="d-flex align-items-center justify-content-between mb-3">
         <div class="text-muted small">
             <span v-if="stats">{{ _('Uptime') }}: [[ uptimeText ]]</span>
@@ -29,6 +29,9 @@
                     </div>
                     <div class="small text-muted mt-1" v-else>
                         {{ _('Connected at') }}: <code>-</code>
+                    </div>
+                    <div class="small text-muted mt-1">
+                        {{ _('Protocol') }}: <code>[[ connection && connection.protocol ? connection.protocol : '-' ]]</code>
                     </div>
                 </div>
             </div>
