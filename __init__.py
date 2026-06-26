@@ -5,6 +5,8 @@ import paho.mqtt.client as mqtt
 from flask import redirect
 
 from app.core.lib.object import getObject, getProperty, updateProperty
+from app.core.lib.common import addNotify, CategoryNotify
+from app.core.utilities.mqtt_errors import describe_mqtt_disconnect
 from app.core.main.BasePlugin import BasePlugin
 from plugins.MqttBridge.forms.SettingForms import SettingsForm
 
@@ -262,9 +264,11 @@ class MqttBridge(BasePlugin):
             self._connected_at_ts = None
             self._push_connection_status()
             return
-        self.logger.warning("MqttBridge disconnected with code: %s", rc)
+        msg = describe_mqtt_disconnect(rc)
+        self.logger.warning("MqttBridge %s", msg)
+        addNotify("Disconnect MQTT", msg, CategoryNotify.Error, self.name)
         self._connection_status = "disconnected"
-        self._connection_error = f"Disconnect code: {rc}"
+        self._connection_error = msg
         self._connected_at_ts = None
         self._push_connection_status()
 
